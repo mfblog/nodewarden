@@ -1,4 +1,4 @@
-import { User, Cipher, Folder, Attachment, Device, Invite, AuditLog, Send, TrustedDeviceTokenSummary, RefreshTokenRecord } from '../types';
+import { User, Cipher, Folder, Attachment, Device, Invite, AuditLog, Send, TrustedDeviceTokenSummary, RefreshTokenRecord, CustomEquivalentDomain } from '../types';
 import { LIMITS } from '../config/limits';
 import { ensureStorageSchema } from './storage-schema';
 import {
@@ -51,13 +51,13 @@ import {
 } from './storage-cipher-repo';
 import {
   addAttachmentToCipher as attachStoredAttachmentToCipher,
+  bulkDeleteAttachmentsByIds as deleteStoredAttachmentsByIds,
   deleteAllAttachmentsByCipher as deleteStoredAttachmentsByCipher,
   deleteAttachment as deleteStoredAttachment,
   getAttachment as findStoredAttachment,
   getAttachmentsByCipher as listStoredAttachmentsByCipher,
   getAttachmentsByCipherIds as listStoredAttachmentsByCipherIds,
   getAttachmentsByUserId as listStoredAttachmentsByUserId,
-  removeAttachmentFromCipher as detachStoredAttachmentFromCipher,
   saveAttachment as saveStoredAttachment,
   updateCipherRevisionDate as updateStoredCipherRevisionDate,
 } from './storage-attachment-repo';
@@ -92,7 +92,9 @@ import {
   isKnownDevice as getKnownStoredDevice,
   isKnownDeviceByEmail as getKnownStoredDeviceByEmail,
   saveTrustedTwoFactorDeviceToken as saveStoredTrustedDeviceToken,
+  touchDeviceLastSeen as touchStoredDeviceLastSeen,
   upsertDevice as saveStoredDevice,
+  updateDeviceName as updateStoredDeviceName,
   updateDeviceKeys as updateStoredDeviceKeys,
 } from './storage-device-repo';
 import {
@@ -103,10 +105,14 @@ import {
   getRevisionDate as getStoredRevisionDate,
   updateRevisionDate as updateStoredRevisionDate,
 } from './storage-revision-repo';
+import {
+  getUserDomainSettings as getStoredUserDomainSettings,
+  saveUserDomainSettings as saveStoredUserDomainSettings,
+} from './storage-domain-rules-repo';
 
 const TWO_FACTOR_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const STORAGE_SCHEMA_VERSION_KEY = 'schema.version';
-const STORAGE_SCHEMA_VERSION = '2026-03-30.1';
+const STORAGE_SCHEMA_VERSION = '2026-05-05-domain-rules-v2';
 
 // D1-backed storage.
 // Contract:
@@ -268,6 +274,29 @@ export class StorageService {
     await createStoredAuditLog(this.db, log);
   }
 
+  // --- Domain rules ---
+
+  async getUserDomainSettings(userId: string) {
+    return getStoredUserDomainSettings(this.db, userId);
+  }
+
+  async saveUserDomainSettings(
+    userId: string,
+    equivalentDomains: string[][],
+    customEquivalentDomains: CustomEquivalentDomain[],
+    excludedGlobalEquivalentDomains: number[]
+  ): Promise<void> {
+    await saveStoredUserDomainSettings(
+      this.db,
+      userId,
+      equivalentDomains,
+      customEquivalentDomains,
+      excludedGlobalEquivalentDomains,
+      new Date().toISOString()
+    );
+    await this.updateRevisionDate(userId);
+  }
+
   // --- Ciphers ---
 
   async getCipher(id: string): Promise<Cipher | null> {
@@ -338,7 +367,6 @@ export class StorageService {
       userId,
       ids,
       this.sqlChunkSize.bind(this),
-      this.saveCipher.bind(this),
       this.updateRevisionDate.bind(this)
     );
   }
@@ -346,7 +374,7 @@ export class StorageService {
   // Clear folder references from all ciphers owned by the user.
   // Without this, deleting a folder leaves stale folderId values in cipher JSON.
   async clearFolderFromCiphers(userId: string, folderId: string): Promise<void> {
-    await clearStoredFolderFromCiphers(this.db, userId, folderId, this.saveCipher.bind(this));
+    await clearStoredFolderFromCiphers(this.db, userId, folderId);
   }
 
   async getAllFolders(userId: string): Promise<Folder[]> {
@@ -371,6 +399,10 @@ export class StorageService {
     await deleteStoredAttachment(this.db, id);
   }
 
+  async bulkDeleteAttachmentsByIds(ids: string[]): Promise<void> {
+    await deleteStoredAttachmentsByIds(this.db, this.sqlChunkSize.bind(this), ids);
+  }
+
   async getAttachmentsByCipher(cipherId: string): Promise<Attachment[]> {
     return listStoredAttachmentsByCipher(this.db, cipherId);
   }
@@ -385,10 +417,6 @@ export class StorageService {
 
   async addAttachmentToCipher(cipherId: string, attachmentId: string): Promise<void> {
     await attachStoredAttachmentToCipher(this.db, cipherId, attachmentId);
-  }
-
-  async removeAttachmentFromCipher(cipherId: string, attachmentId: string): Promise<void> {
-    await detachStoredAttachmentFromCipher(cipherId, attachmentId);
   }
 
   async deleteAllAttachmentsByCipher(cipherId: string): Promise<void> {
@@ -548,6 +576,14 @@ export class StorageService {
     }
   ): Promise<boolean> {
     return updateStoredDeviceKeys(this.db, userId, deviceIdentifier, keys);
+  }
+
+  async updateDeviceName(userId: string, deviceIdentifier: string, name: string): Promise<boolean> {
+    return updateStoredDeviceName(this.db, userId, deviceIdentifier, name);
+  }
+
+  async touchDeviceLastSeen(userId: string, deviceIdentifier: string): Promise<boolean> {
+    return touchStoredDeviceLastSeen(this.db, userId, deviceIdentifier);
   }
 
   async clearDeviceKeys(userId: string, deviceIdentifiers: string[]): Promise<number> {

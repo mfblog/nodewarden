@@ -42,3 +42,7 @@ tmp/
 .tmp/
 
 nodewarden.wiki/
+AGENTS.md
+settings.json
+.claude/
+NodeWarden-compat/
